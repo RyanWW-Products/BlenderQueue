@@ -1,0 +1,32 @@
+# Build output -- the installer and portable zip are published as GitHub
+# Releases instead, since they are ~75 MB together.
+/dist/
+/build/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# BlenderQueue runtime data
+# Portable builds keep their settings beside the executable; neither those nor
+# saved queues belong in the repository.
+BlenderQueueData/
+*.bqueue
+startup.log
+
+# Blender
+*.blend1
+*.blend2
+
+# Editors and OS
+.vscode/
+.idea/
+*.swp
+*~
+Thumbs.db
+desktop.ini
+.DS_Store
