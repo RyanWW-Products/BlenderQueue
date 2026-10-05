@@ -9,7 +9,7 @@ rescans, and startup drags on for a minute or more.  The folder build starts in
 a couple of seconds.  ``install.bat`` copies the whole folder into
 %LOCALAPPDATA%\\Programs, which is how most Windows apps install anyway.
 
-The two Blender-side scripts ship as data so the app can hand their paths to
+The Blender-side scripts ship as data so the app can hand their paths to
 blender.exe at runtime; ``blenderqueue.blender.script_path`` finds them under
 ``scripts/``.
 """
@@ -46,9 +46,12 @@ a = Analysis(
         ("blenderqueue/scripts/bq_inspect.py", "scripts"),
         ("blenderqueue/scripts/bq_render.py", "scripts"),
         ("blenderqueue/scripts/bq_analyze.py", "scripts"),
+        ("blenderqueue/scripts/bq_visibility.py", "scripts"),
+        ("blenderqueue/scripts/bq_video.py", "scripts"),
+        ("blenderqueue/scripts/bq_encode.py", "scripts"),
         ("assets/app.ico", "assets"),
     ],
-    hiddenimports=["PySide6.QtCore", "PySide6.QtGui", "PySide6.QtWidgets",
+    hiddenimports=["PySide6.QtCore", "PySide6.QtGui", "PySide6.QtWidgets", "PySide6.QtNetwork",
                    "shiboken6", "shiboken6.Shiboken"],
     hookspath=[],
     hooksconfig={},

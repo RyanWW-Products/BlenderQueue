@@ -203,6 +203,15 @@ def render_command(exe: str, blend_file: str, config_file: str,
     return command
 
 
+def encode_command(exe: str, blend_file: str, manifest: str,
+                   factory_startup: bool = True) -> list:
+    command = [exe, "-b", blend_file]
+    if factory_startup:
+        command.append("--factory-startup")
+    return command + ["--python-exit-code", "1", "--python", script_path("bq_encode.py"),
+                      "--", "--manifest", manifest]
+
+
 FACTORY_STARTUP_HELP = (
     "Runs Blender with --factory-startup, ignoring your user preferences and "
     "add-ons.\n\nLeave this on unless a scene needs an add-on to render. Some "

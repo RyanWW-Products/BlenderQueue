@@ -16,6 +16,10 @@ import traceback
 
 import bpy
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from bq_visibility import apply_visibility
+from bq_video import encode_video, prepare_video, record_frame, set_file_format
+
 MARKER = "BQ>>"
 
 
@@ -96,7 +100,10 @@ def assign_path(scene, path, value):
 
 def apply_simple(scene, key, path, value):
     try:
-        assign_path(scene, path, value)
+        if path == "render.image_settings.file_format":
+            set_file_format(scene.render.image_settings, value)
+        else:
+            assign_path(scene, path, value)
         return True
     except Exception as exc:
         emit("skip", key=key, msg="%s: %s" % (type(exc).__name__, exc))
@@ -260,8 +267,9 @@ def apply_follow_paths(config):
 class Progress:
     """Authoritative frame events, straight from Blender's render handlers."""
 
-    def __init__(self, scene):
+    def __init__(self, scene, video_manifest=""):
         self.scene = scene
+        self.video_manifest = video_manifest
         self.written = 0
         self.cancelled = False
 
@@ -272,6 +280,13 @@ class Progress:
         h.render_write.append(self.on_write)
         h.render_cancel.append(self.on_cancel)
 
+    def uninstall(self):
+        h = bpy.app.handlers
+        for handlers, callback in ((h.render_pre, self.on_pre), (h.render_post, self.on_post),
+                                   (h.render_write, self.on_write), (h.render_cancel, self.on_cancel)):
+            if callback in handlers:
+                handlers.remove(callback)
+
     def on_pre(self, scene, *_):
         emit("pre", frame=scene.frame_current)
 
@@ -279,12 +294,17 @@ class Progress:
         emit("post", frame=scene.frame_current)
 
     def on_write(self, scene, *_):
+        if scene != self.scene:
+            return
         self.written += 1
         try:
             path = scene.render.frame_path(frame=scene.frame_current)
         except Exception:
             path = scene.render.filepath
-        emit("write", frame=scene.frame_current, path=path, written=self.written)
+        if self.video_manifest:
+            record_frame(self.video_manifest, scene.frame_current, path)
+        emit("write", frame=scene.frame_current, path=path, written=self.written,
+             cached=bool(self.video_manifest))
 
     def on_cancel(self, scene, *_):
         self.cancelled = True
@@ -314,6 +334,7 @@ def main():
     scene = resolve_scene(config)
     apply_groups(scene, config)
     apply_follow_paths(config)
+    apply_visibility(scene, config.get("visibility", {}).get(scene.name, {}), emit)
 
     total = 0
     if scene.frame_step > 0:
@@ -335,9 +356,17 @@ def main():
         emit("done", rendered=0, dry_run=True)
         return
 
-    progress = Progress(scene)
+    video_manifest = prepare_video(scene, config, emit)
+    progress = Progress(scene, video_manifest)
     progress.install()
-    bpy.ops.render.render(animation=True, scene=scene.name)
+    try:
+        bpy.ops.render.render(animation=True, scene=scene.name)
+    finally:
+        progress.uninstall()
+    if video_manifest:
+        if progress.cancelled:
+            raise RuntimeError("Render cancelled; complete frames are available for recovery.")
+        encode_video(scene, video_manifest, partial=False, emit=emit)
     emit("done", rendered=progress.written, cancelled=progress.cancelled)
 
 

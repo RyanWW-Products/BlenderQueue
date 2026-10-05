@@ -22,6 +22,7 @@ from .follow_path_dialog import FollowPathDialog
 from .overrides_panel import OverridesPanel
 from .queue_view import QueueView
 from .ribbon import Ribbon, make_action
+from .visibility_panel import VisibilityPanel
 
 BLEND_FILTER = "Blender files (*.blend);;All files (*)"
 QUEUE_FILTER = "BlenderQueue files (*.bqueue);;All files (*)"
@@ -42,6 +43,7 @@ class MainWindow(QMainWindow):
         self.logs: dict = {}
         self.installs: list = []
         self._current_queue_path = self.settings.last_queue_path
+        self._close_after_run = False
 
         self.inspector = Inspector(self)
         self.inspector.finished.connect(self._on_inspected)
@@ -58,6 +60,7 @@ class MainWindow(QMainWindow):
         self.runner.queueFinished.connect(self._on_queue_finished)
         self.runner.log.connect(self._append_log)
         self.runner.stateChanged.connect(self._sync_actions)
+        self.runner.recoveryAvailable.connect(self._on_recovery_available)
 
         self._build_actions()
         self._build_ui()
@@ -92,7 +95,8 @@ class MainWindow(QMainWindow):
         self.act_open_queue = A("Open", "open", "Load a saved queue", "Ctrl+Shift+O")
         self.act_save_queue = A("Save As", "save", "Save this queue to a file", "Ctrl+S")
 
-        self.act_start = A("Start", "play", "Render every enabled job in order", "F5")
+        self.act_start = A("Start", "play", "Render enabled Pending jobs in order", "F5")
+        self.act_reset = A("Reset Selected", "refresh", "Reset selected jobs to Pending and render them again")
         self.act_pause = A("Pause", "pause", "Stop after the current job finishes",
                            checkable=True)
         self.act_stop = A("Stop", "stop", "Abandon the queue now", "Shift+F5")
@@ -112,6 +116,7 @@ class MainWindow(QMainWindow):
         self.act_copy_settings = A("Copy Settings", "duplicate",
                                    "Copy the first selected job's overrides onto the rest")
         self.act_about = A("About", "info", "Version and help")
+        self.act_updates = A("Updates", "refresh", "Check GitHub for the latest BlenderQueue release")
 
         self.act_analyze = A("Analyse", "engine",
                              "Measure what will make this file slow to render", "F7")
@@ -201,6 +206,9 @@ class MainWindow(QMainWindow):
         group.add_big(self.act_stop)
         group.add_big(self.act_skip)
 
+        group = tab.add_group("Restart")
+        group.add_big(self.act_reset, 105)
+
         group = tab.add_group("Blender")
         picker = QWidget()
         picker_layout = QVBoxLayout(picker)
@@ -265,6 +273,7 @@ class MainWindow(QMainWindow):
 
         group = tab.add_group("Help")
         group.add_big(self.act_about)
+        group.add_big(self.act_updates)
 
         # ---- Analysis ----------------------------------------------
         tab = self.ribbon.add_tab("Analysis")
@@ -304,6 +313,7 @@ class MainWindow(QMainWindow):
         self.act_open_queue.triggered.connect(self.open_queue)
         self.act_save_queue.triggered.connect(self.save_queue_as)
         self.act_start.triggered.connect(self.start_render)
+        self.act_reset.triggered.connect(self.reset_selected)
         self.act_pause.toggled.connect(self.runner.set_paused)
         self.act_stop.triggered.connect(self.stop_render)
         self.act_skip.triggered.connect(self.runner.skip)
@@ -315,6 +325,7 @@ class MainWindow(QMainWindow):
         self.act_open_blender.triggered.connect(self.open_in_blender)
         self.act_copy_settings.triggered.connect(self.copy_overrides)
         self.act_about.triggered.connect(self.show_about)
+        self.act_updates.triggered.connect(self.show_updates)
         self.act_analyze.triggered.connect(self.analyze_selected)
         self.act_analyze_all.triggered.connect(self.analyze_all)
         self.act_add_analyze.triggered.connect(self.add_and_analyze)
@@ -362,6 +373,11 @@ class MainWindow(QMainWindow):
         self.overrides = OverridesPanel(self.detail)
         self.overrides.changed.connect(self._on_overrides_changed)
         self.detail.addTab(self.overrides, "Render Settings")
+
+        self.visibility_panel = VisibilityPanel(self.detail)
+        self.visibility_panel.changed.connect(self._on_visibility_changed)
+        self.visibility_panel.inspectRequested.connect(self._inspect_visibility)
+        self.detail.addTab(self.visibility_panel, "Per Job Visibility")
 
         self.analysis_panel = AnalysisPanel(self.detail)
         self.analysis_panel.analyzeRequested.connect(self.analyze_selected)
@@ -752,10 +768,10 @@ class MainWindow(QMainWindow):
     def start_render(self):
         if self.runner.running:
             return
-        pending = [j for j in self.jobs if j.enabled]
+        pending = [j for j in self.jobs if j.enabled and j.status == Status.PENDING]
         if not pending:
             QMessageBox.information(self, "Nothing to render",
-                                    "Tick at least one job in the queue first.")
+                                    "Enable a Pending job, or use Reset Selected to render a finished job again.")
             return
         missing = [j for j in pending if not j.exists]
         if missing:
@@ -780,11 +796,38 @@ class MainWindow(QMainWindow):
     def stop_render(self):
         if not self.runner.running and not self.runner.paused:
             return
-        if QMessageBox.question(self, "Stop rendering",
-                                "Stop the queue and end the current render?"
-                                ) != QMessageBox.Yes:
-            return
         self.runner.stop()
+
+    def reset_selected(self):
+        jobs = [job for job in self.selected_jobs() if not job.is_locked]
+        for job in jobs:
+            job.reset_runtime()
+            job.enabled = True
+            self.logs.pop(job.id, None)
+        if jobs:
+            self.refresh_list()
+            self.queue_view.select_ids([job.id for job in jobs])
+            self._show_details(self.current_job())
+            self.status_label.setText(f"Reset {len(jobs)} job(s) — ready to render again")
+
+    def _ask_encode_frames(self, job, frames, directory):
+        box = QMessageBox(self)
+        box.setWindowTitle("Save the rendered frames as a video?")
+        box.setTextFormat(Qt.PlainText)
+        box.setText(f"{job.name}: {frames} complete frame(s) are ready.\n\n"
+                    "Encode them into a playable video now, or keep the frames without encoding?\n\n"
+                    "Frames are kept in:\n" + directory)
+        encode = box.addButton("Encode Rendered Frames", QMessageBox.AcceptRole)
+        box.addButton("Keep Frames Only", QMessageBox.RejectRole)
+        box.setDefaultButton(encode)
+        box.exec()
+        return box.clickedButton() == encode
+
+    def _on_recovery_available(self, job_id, frames, directory):
+        self.autosave()
+        job = self.job_by_id(job_id)
+        encode = bool(job and self._ask_encode_frames(job, frames, directory))
+        self.runner.resolve_recovery(encode)
 
     def dry_run(self):
         job = self.current_job()
@@ -854,6 +897,11 @@ class MainWindow(QMainWindow):
         if job is None:
             return
         self.refresh_row(job)
+        if job.status == Status.ENCODING or self.runner.waiting_recovery:
+            self.status_label.setText(f"{job.name}: {job.message}")
+            self.eta_label.setText("")
+            self._update_overall()
+            return
         if job.frames_total:
             per_frame = job.seconds_per_frame
             detail = ""
@@ -874,6 +922,8 @@ class MainWindow(QMainWindow):
                 self._show_details(job)
         self._update_overall()
         self._update_counts()
+        if job and job.status == Status.FAILED and message.startswith("Encoding failed"):
+            QMessageBox.warning(self, "Video was not saved", message)
 
     def _on_queue_finished(self, completed: bool):
         self.overall_bar.setVisible(False)
@@ -881,12 +931,20 @@ class MainWindow(QMainWindow):
         self.act_pause.setChecked(False)
         done = sum(1 for j in self.jobs if j.status == Status.DONE)
         failed = sum(1 for j in self.jobs if j.status == Status.FAILED)
+        stopped = sum(1 for j in self.jobs if j.status == Status.CANCELLED)
         summary = f"Finished - {done} rendered"
         if failed:
             summary += f", {failed} failed"
+        if stopped:
+            summary += f", {stopped} stopped"
         self.status_label.setText(summary)
         self._sync_actions()
         self._update_counts()
+
+        if self._close_after_run:
+            self._close_after_run = False
+            QTimer.singleShot(0, self.close)
+            return
 
         if self.settings.auto_open_output:
             for job in self.jobs:
@@ -916,7 +974,7 @@ class MainWindow(QMainWindow):
 
     def _update_eta(self):
         job = self.runner.current_job
-        if job is None or not job.eta_seconds:
+        if job is None or job.status == Status.ENCODING or not job.eta_seconds:
             self.eta_label.setText("")
             return
         waiting = sum(1 for j in self.jobs
@@ -934,7 +992,7 @@ class MainWindow(QMainWindow):
         for job in enabled:
             if job.status == Status.DONE:
                 total += 1.0
-            elif job.status == Status.RUNNING and job.frames_total:
+            elif job.is_locked and job.frames_total:
                 total += job.frames_done / job.frames_total
         self.overall_bar.setValue(int(round(100 * total / len(enabled))))
 
@@ -1089,6 +1147,7 @@ class MainWindow(QMainWindow):
     def _show_details(self, job):
         locked = bool(job and job.is_locked)
         self.overrides.set_job(job, read_only=locked)
+        self.visibility_panel.set_job(job, read_only=locked)
         self.analysis_panel.set_job(job)
         if job is None:
             self.detail_title.setText("No job selected")
@@ -1216,7 +1275,19 @@ class MainWindow(QMainWindow):
             return
         if job:
             self.refresh_row(job)
+            self.visibility_panel.set_job(job)
             self.autosave()
+
+    def _on_visibility_changed(self):
+        job = self.current_job()
+        if job and not job.is_locked:
+            self.refresh_row(job)
+            self.autosave()
+
+    def _inspect_visibility(self):
+        job = self.current_job()
+        if job and not job.is_locked:
+            self.queue_job_inspection(job)
 
     def _on_notes_changed(self):
         job = self.current_job()
@@ -1271,10 +1342,14 @@ class MainWindow(QMainWindow):
                 "Select the job to copy from first, then the jobs to copy onto.")
             return
         source, targets = jobs[0], jobs[1:]
+        targets = [job for job in targets if not job.is_locked]
         payload = source.to_dict()
         for job in targets:
             job.use_overrides = source.use_overrides
-            job.groups = Job.from_dict(payload).groups
+            copied = Job.from_dict(payload)
+            job.groups = copied.groups
+            job.visibility_enabled = copied.visibility_enabled
+            job.visibility = copied.visibility
         self.refresh_list()
         self.status_label.setText(
             f"Copied overrides from {source.name} onto {len(targets)} job(s)")
@@ -1286,6 +1361,8 @@ class MainWindow(QMainWindow):
         folder = ""
         if job.last_output:
             folder = os.path.dirname(job.last_output)
+        elif job.video_manifest and os.path.isfile(job.video_manifest):
+            folder = os.path.dirname(job.video_manifest)
         elif job.use_overrides and job.group("output").enabled:
             folder = job.group("output").values.get("output_dir", "")
         if not folder:
@@ -1320,12 +1397,17 @@ class MainWindow(QMainWindow):
             f"<p style='color:{theme.TEXT_DIM}'>Blender builds found: "
             f"{len(self.installs)}</p>")
 
+    def show_updates(self):
+        from .update_dialog import UpdateDialog
+        UpdateDialog(self).exec()
+
     def _context_menu(self, point):
         if not self.jobs:
             return
         menu = QMenu(self)
         menu.addAction(self.act_rename)
         menu.addAction(self.act_duplicate)
+        menu.addAction(self.act_reset)
         menu.addAction(self.act_remove)
         menu.addSeparator()
         menu.addAction(self.act_follow)
@@ -1351,8 +1433,9 @@ class MainWindow(QMainWindow):
 
         self.act_start.setEnabled(has_jobs and not running and bool(self.installs))
         self.act_pause.setEnabled(running)
-        self.act_stop.setEnabled(running)
-        self.act_skip.setEnabled(self.runner.running)
+        self.act_stop.setEnabled(running and not self.runner.waiting_recovery)
+        self.act_skip.setEnabled(self.runner.running and not self.runner.waiting_recovery)
+        self.act_reset.setEnabled(editable)
 
         for action in (self.act_remove, self.act_up, self.act_down,
                        self.act_top, self.act_bottom, self.act_toggle):
@@ -1411,14 +1494,21 @@ class MainWindow(QMainWindow):
         event.acceptProposedAction()
 
     def closeEvent(self, event):
-        if self.runner.running:
+        if self.runner.running or self.runner.paused:
+            if self._close_after_run or self.runner.waiting_recovery:
+                event.ignore()
+                return
             answer = QMessageBox.question(
                 self, "Rendering in progress",
-                "A render is still running. Stop it and close?")
+                "Stop the queue and close?\n\nIf video frames are available, "
+                "you can encode them before the window closes.")
             if answer != QMessageBox.Yes:
                 event.ignore()
                 return
+            self._close_after_run = True
             self.runner.stop()
+            event.ignore()
+            return
         self.inspector.cancel_all()
         self.analyzer.cancel_all()
         self.settings.window_geometry = bytes(self.saveGeometry().toBase64()).decode()

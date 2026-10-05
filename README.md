@@ -12,14 +12,20 @@ will make it slow before you commit to rendering it.
 
 | | What it is | Where its settings live |
 | --- | --- | --- |
-| `BlenderQueue-1.0.0-Setup.exe` | Normal installer. Start Menu entry, optional desktop shortcut and `.bqueue` file association, proper uninstaller. Installs per-user, so no administrator rights. | `%APPDATA%\BlenderQueue` |
-| `BlenderQueue-1.0.0-portable.zip` | Unzip and run. Nothing is installed and nothing is written outside the folder. | `BlenderQueueData` beside the .exe |
+| `BlenderQueue-1.1.0-Setup.exe` | Normal installer. Start Menu entry, optional desktop shortcut and `.bqueue` file association, proper uninstaller. Installs per-user, so no administrator rights. | `%APPDATA%\BlenderQueue` |
+| `BlenderQueue-1.1.0-portable.zip` | Unzip and run. Nothing is installed and nothing is written outside the folder. | `BlenderQueueData` beside the .exe |
 
 Both contain the same application. The portable build is marked by a
 `portable.txt` file next to the executable; delete it and that copy starts
 behaving like an installed one.
 
 Keep the `_internal` folder next to the executable in both cases.
+
+**Tools → Updates** checks the latest public release on
+[GitHub](https://github.com/ryanw341/BlenderQueue), compares it with the installed
+version, and links to the latest release downloads and repository. Download
+the installer or portable build there, then close BlenderQueue before replacing
+your installed copy. The links remain available if the update check fails.
 
 Blender itself is **not** bundled. The app finds your existing installs
 automatically (Program Files, Steam, PATH, and the file association in the
@@ -85,6 +91,44 @@ codec options appear, pick Cycles and the EEVEE sampling row goes away.
 
 So `D:\renders\{date}\{job}\` gives each job its own dated folder.
 
+## Per Job Visibility
+
+Select a job and open **Per Job Visibility** beside Render Settings. Use
+**Read File** to load or refresh the outliner, including jobs restored from older
+queues, then enable **Override visibility for this job**.
+
+The expandable tree shows nested collections, objects, and object parenting.
+Search finds objects and collections while retaining their parent hierarchy;
+**Expand All** and **Collapse All** control the tree. Objects and collections
+linked in several places appear in each location.
+
+| Control | Effect |
+| --- | --- |
+| Render | Allow an object or collection to render, across all view layers |
+| Include | Include a collection in the selected view layer |
+| Holdout | Use a collection as a holdout mask in that layer |
+| Indirect | Restrict a collection to indirect lighting in that layer (Cycles) |
+| Render this layer | Include the selected view layer in the render |
+
+The scene follows **Render Settings → Scene and Camera**. The view-layer picker
+chooses which layer's controls you are editing; it does not switch the render to
+that layer. Collection inclusion is specific to each location in the hierarchy.
+An object's Render switch is shared across its collection links. Hidden parent
+collections still hide their contents; hiding a parent object does not hide its
+child objects. The State column describes restrictions at that location, rather
+than predicting camera framing, materials, or other rendering effects.
+
+Bold controls are explicit job overrides. Right-click rows to show or hide
+selected entries, or restore their file settings. **Reset Scene** clears all
+visibility overrides for the current scene. Turning off the master switch
+temporarily disables the overrides while keeping your choices.
+
+Visibility settings work independently of the Render Settings master switch.
+They save with the queue, follow duplicated jobs, and are included by **Copy
+Settings**. The running job is locked. Overrides apply only to Blender's render
+process, including animated render visibility; the original `.blend` is never
+saved or changed. Missing or renamed entries are reported in the render log.
+
 ## Analysis
 
 **Analysis → Analyse** (`F7`) opens the `.blend` read-only and measures what
@@ -141,6 +185,35 @@ the row and the status bar, with Blender's own log on the Log tab.
 - **Stop** ends the run immediately
 - **Skip Job** abandons the current file and moves to the next
 - **Dry Run** applies everything and reports what *would* render, without rendering
+
+**Render → Reset Selected** (also in the row's right-click menu) resets selected
+jobs to Pending and enables them for another run. It clears progress, elapsed
+times, errors and the old log while preserving render settings, visibility,
+Follow Path choices, and files already written. Rendering or encoding jobs are
+locked. **Start** runs enabled Pending jobs; completed, failed, stopped and
+skipped jobs can be queued again with Reset Selected.
+
+### Stopping a video render
+
+Video jobs first write lossless EXR frames in a `.blenderqueue-frames-*` folder
+beside the output video. Blender then encodes those frames with the job's video
+settings and audio. The final video path is published only after encoding has
+finished, so stopping cannot leave an unfinished movie at that path.
+
+After **Stop**, **Skip Job**, or an unexpected Blender exit, the app asks whether
+to **Encode Rendered Frames** or **Keep Frames Only** when complete frames exist.
+Encoding saves a separately named `-partial-` video without rerendering the scene
+or replacing a previous finished video. The frame folder remains available in
+either case. Closing the app during a render offers the same choice and waits
+for encoding before closing. If encoding fails or is stopped, the frames are
+retained and the failure is reported.
+
+Complete video renders automatically remove their frame cache after the movie
+is saved. Interrupted renders retain it, so allow extra disk space for lossless
+frames. The Output action opens retained frames when there is no finished video.
+Existing corrupt movies cannot be reconstructed without saved frames; this
+protection applies to new renders. Stereo/multiview jobs should use image-sequence
+output; recovery-safe video currently supports single-view output.
 
 Time per frame is averaged over the last 25 finished frames, so the estimate
 tracks a render that speeds up or slows down rather than being dragged by the
@@ -218,13 +291,15 @@ command line used, so you can reproduce any job by hand.
 ## How it works
 
 The app never links against Blender. It launches `blender.exe -b <file>
---factory-startup --python <script>` and talks to three small scripts that run
+--factory-startup --python <script>` and talks to scripts that run
 inside Blender's own interpreter:
 
 - `bq_inspect.py` reports scenes, cameras, curves, Follow Path constraints and
   every current render setting as JSON
 - `bq_render.py` applies a job's overrides and renders, reporting progress as
   `BQ>>{...}` lines
+- `bq_encode.py` encodes completed recovery frames after an interrupted render;
+  `bq_video.py` manages the shared frame cache and video encoding
 - `bq_analyze.py` measures geometry, textures, lighting, materials, volumes,
   particles and sampling
 
@@ -234,3 +309,26 @@ the ratings can be retuned without re-reading every `.blend`.
 Which render settings exist is declared once in `blenderqueue/schema.py`. The
 editor UI, the saved job files and the apply step are all generated from that
 table, so adding a setting means adding one line there.
+
+`bq_visibility.py` is shared by inspection and rendering. It identifies linked
+datablocks by name and library and view-layer collections by their full paths.
+
+Run the model and offscreen Qt regression tests with:
+
+```text
+python -m unittest discover -s tests -v
+```
+
+The Blender integration test generates a small scene, checks hierarchy and
+layer settings, renders visibility variants, and verifies the output pixels:
+
+```text
+blender -b --factory-startup --python-exit-code 1 --python tests/blender_visibility_smoke.py -- --out build/visibility-smoke
+```
+
+To test actual interrupted video renders, recovery encoding, audio, and output
+decoding (requires `ffmpeg` and `ffprobe` on PATH for verification only):
+
+```text
+python tests/run_video_smoke.py --blender "C:/path/to/blender.exe" --out build/video-smoke
+```

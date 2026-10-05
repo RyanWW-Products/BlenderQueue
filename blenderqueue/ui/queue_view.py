@@ -169,7 +169,7 @@ class QueueView(QTreeWidget):
         item.setForeground(1, QColor(theme.STATUS_COLORS.get(job.status, theme.TEXT)))
 
         fraction = None
-        if job.status == Status.RUNNING:
+        if job.is_locked:
             fraction = (job.frames_done / job.frames_total) if job.frames_total else 0.0
         elif job.status == Status.DONE:
             fraction = 1.0

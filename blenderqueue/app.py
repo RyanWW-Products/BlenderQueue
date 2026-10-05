@@ -36,7 +36,8 @@ def selftest(report_path: str) -> int:
         record("frozen", bool(getattr(sys, "frozen", False)))
         record("resource_dir", blender.resource_dir(),
                os.path.isdir(blender.resource_dir()))
-        for name in ("bq_inspect.py", "bq_render.py", "bq_analyze.py"):
+        for name in ("bq_inspect.py", "bq_render.py", "bq_analyze.py", "bq_visibility.py",
+                     "bq_video.py", "bq_encode.py"):
             path = blender.script_path(name)
             record("script:" + name, path, os.path.isfile(path))
 
@@ -48,8 +49,11 @@ def selftest(report_path: str) -> int:
         record("override_fields", len(window.overrides._editors),
                len(window.overrides._editors) == len(schema.FIELD_BY_KEY))
         record("icons", not theme.icon("path", theme.ACCENT, 32).isNull())
-        record("analysis_tab", window.detail.count(),
-               window.detail.count() == 4)
+        record("detail_tabs", window.detail.count(), window.detail.count() == 5)
+        record("visibility_tab", window.detail.tabText(window.detail.indexOf(window.visibility_panel)),
+               window.detail.indexOf(window.visibility_panel) >= 0)
+        from .ui.update_dialog import UpdateDialog
+        record("updates", UpdateDialog.__name__, window.act_updates.isEnabled())
 
         installs = blender.discover()
         record("blender_installs", [i.detail for i in installs], True)

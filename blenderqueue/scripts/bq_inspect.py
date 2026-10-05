@@ -18,6 +18,9 @@ import traceback
 
 import bpy
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from bq_visibility import describe_visibility
+
 
 # --------------------------------------------------------------------------
 # helpers
@@ -187,6 +190,7 @@ def describe_scene(scene, paths):
         "follow_paths": collect_follow_paths(scene),
         "curve_modifiers": collect_curve_modifiers(scene),
         "settings": settings,
+        "visibility": describe_visibility(scene),
     }
 
 

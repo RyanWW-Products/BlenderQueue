@@ -29,6 +29,7 @@ INFO = "#4a9edd"
 STATUS_COLORS = {
     "Pending": TEXT_DIM,
     "Rendering": ACCENT,
+    "Encoding": ACCENT,
     "Done": OK,
     "Failed": FAIL,
     "Cancelled": WARN,
@@ -188,6 +189,33 @@ def _draw(name: str, painter: QPainter, color: str):
     elif name == "check":
         _pen(painter, OK, 2.4)
         painter.drawPolyline([QPointF(5, 12), QPointF(10, 17), QPointF(19, 6)])
+
+    elif name == "mesh":
+        _pen(painter, c)
+        painter.drawPolyline([QPointF(12, 3), QPointF(21, 8), QPointF(21, 17),
+                              QPointF(12, 22), QPointF(3, 17), QPointF(3, 8), QPointF(12, 3)])
+        painter.drawPolyline([QPointF(3, 8), QPointF(12, 13), QPointF(21, 8)])
+        painter.drawLine(QPointF(12, 13), QPointF(12, 22))
+
+    elif name == "light":
+        _pen(painter, c)
+        painter.drawEllipse(QRectF(8, 8, 8, 8))
+        for a, b in [((12, 2), (12, 5)), ((12, 19), (12, 22)),
+                     ((2, 12), (5, 12)), ((19, 12), (22, 12)),
+                     ((4, 4), (6, 6)), ((18, 18), (20, 20)),
+                     ((4, 20), (6, 18)), ((18, 6), (20, 4))]:
+            painter.drawLine(QPointF(*a), QPointF(*b))
+
+    elif name in ("empty", "armature"):
+        _pen(painter, c)
+        if name == "empty":
+            painter.drawLine(QPointF(3, 12), QPointF(21, 12))
+            painter.drawLine(QPointF(12, 3), QPointF(12, 21))
+        else:
+            painter.drawEllipse(QRectF(10, 2, 4, 4))
+            painter.drawPolyline([QPointF(12, 6), QPointF(8, 13), QPointF(12, 19),
+                                  QPointF(16, 13), QPointF(12, 6)])
+            painter.drawEllipse(QRectF(10, 19, 4, 4))
 
     elif name == "camera":
         _pen(painter, c)

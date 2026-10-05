@@ -7,7 +7,7 @@
 ; install if they run it elevated.
 
 #ifndef MyAppVersion
-  #define MyAppVersion "1.0.0"
+  #define MyAppVersion "1.1.0"
 #endif
 
 #define MyAppName "BlenderQueue"

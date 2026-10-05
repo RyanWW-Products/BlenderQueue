@@ -6,6 +6,7 @@ import datetime as _dt
 import os
 import re
 import uuid
+from copy import deepcopy
 from dataclasses import dataclass, field
 
 from . import schema
@@ -16,6 +17,7 @@ QUEUE_FORMAT_VERSION = 1
 class Status:
     PENDING = "Pending"
     RUNNING = "Rendering"
+    ENCODING = "Encoding"
     DONE = "Done"
     FAILED = "Failed"
     CANCELLED = "Cancelled"
@@ -115,6 +117,9 @@ class Job:
     groups: dict = field(default_factory=dict)          # group_key -> GroupOverride
     follow_paths: list = field(default_factory=list)    # FollowPathEdit
     notes: str = ""
+    visibility_enabled: bool = False
+    visibility: dict = field(default_factory=dict)  # scene -> sparse outliner overrides
+    video_manifest: str = ""          # retained recovery frames, also saved with the queue
 
     # --- populated by inspection / analysis (cached, not authoritative) --
     info: dict = field(default_factory=dict)
@@ -153,7 +158,7 @@ class Job:
     @property
     def is_locked(self) -> bool:
         """A job being rendered right now must not be edited underneath it."""
-        return self.status == Status.RUNNING
+        return self.status in (Status.RUNNING, Status.ENCODING)
 
     @property
     def duration(self) -> float:
@@ -240,15 +245,17 @@ class Job:
         return scenes[0]
 
     def selected_scene(self) -> str:
-        chosen = self.group("scene").values.get("scene") if self.use_overrides else ""
+        group = self.group("scene")
+        chosen = group.values.get("scene") if self.use_overrides and group.enabled else ""
         if chosen:
             return chosen
         return self.info.get("active_scene") or ""
 
     def summary(self) -> str:
         """Short human description shown in the queue list."""
+        visibility = self.visibility_enabled and bool(self.visibility)
         if not self.use_overrides:
-            return "File settings"
+            return "Visibility overrides" if visibility else "File settings"
         active = self.active_group_keys()
         bits = []
         if active:
@@ -256,6 +263,8 @@ class Job:
         retargets = len(self.active_follow_paths())
         if retargets:
             bits.append(f"{retargets} path{'s' if retargets != 1 else ''}")
+        if visibility:
+            bits.append("visibility")
         return ", ".join(bits) or "File settings"
 
     def reset_runtime(self):
@@ -292,6 +301,7 @@ class Job:
             "curve_modifiers": [],
             "enable_cycles": True,
             "dry_run": dry_run,
+            "visibility": deepcopy(self.visibility) if self.visibility_enabled else {},
         }
 
     def _expand_output_tokens(self, values: dict, index: int) -> dict:
@@ -318,6 +328,9 @@ class Job:
             "follow_paths": [f.to_dict() for f in self.follow_paths],
             "info": self.info,
             "analysis": self.analysis,
+            "visibility_enabled": self.visibility_enabled,
+            "visibility": deepcopy(self.visibility),
+            "video_manifest": self.video_manifest,
         }
 
     @classmethod
@@ -332,6 +345,9 @@ class Job:
             notes=data.get("notes", ""),
             info=data.get("info") or {},
             analysis=data.get("analysis") or {},
+            visibility_enabled=bool(data.get("visibility_enabled", False)),
+            visibility=deepcopy(data.get("visibility") or {}),
+            video_manifest=data.get("video_manifest") or "",
         )
         for key, raw in (data.get("groups") or {}).items():
             if key in schema.GROUP_BY_KEY:

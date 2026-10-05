@@ -16,6 +16,7 @@ from PySide6.QtCore import QObject, QProcess, Signal
 
 from . import blender, schema
 from .models import Job, Status
+from .scripts.bq_video import read_cache
 
 MARKER = "BQ>>"
 
@@ -180,6 +181,7 @@ class QueueRunner(QObject):
     queueFinished = Signal(bool)              # completed_everything
     log = Signal(str, str)                    # job_id, line
     stateChanged = Signal()
+    recoveryAvailable = Signal(str, int, str)  # job_id, complete frames, folder
 
     def __init__(self, settings, parent=None):
         super().__init__(parent)
@@ -194,8 +196,14 @@ class QueueRunner(QObject):
         self._stopping = False
         self._skipping = False
         self._exe_for = {}
+        self._queue_positions = {}
         self._had_error = False
         self._frame_started = 0.0
+        self._video_manifest = ""
+        self._video_saved = ""
+        self._waiting_recovery = False
+        self._recovering = False
+        self._interrupted = (1, QProcess.CrashExit)
 
     # ---- state ------------------------------------------------------
 
@@ -211,6 +219,10 @@ class QueueRunner(QObject):
     def current_job(self) -> Job | None:
         return self._current
 
+    @property
+    def waiting_recovery(self) -> bool:
+        return self._waiting_recovery
+
     def remaining(self) -> int:
         return max(0, len(self._jobs) - self._index - 1)
 
@@ -219,7 +231,8 @@ class QueueRunner(QObject):
     def start(self, jobs: list, exe_for: dict):
         if self.running:
             return
-        self._jobs = list(jobs)
+        self._jobs = [job for job in jobs if job.enabled and job.status == Status.PENDING]
+        self._queue_positions = {job.id: index for index, job in enumerate(jobs)}
         self._exe_for = dict(exe_for)
         self._index = -1
         self._paused = False
@@ -231,9 +244,11 @@ class QueueRunner(QObject):
         self._next()
 
     def stop(self):
-        """Abandon the queue; kills Blender if a frame is in flight."""
+        """Stop rendering now; offer recovery of committed video frames afterwards."""
         self._stopping = True
         self._paused = False
+        if self._waiting_recovery:
+            return
         if self._process is not None:
             self._process.kill()
         else:
@@ -285,6 +300,10 @@ class QueueRunner(QObject):
 
         self._current = job
         self._buffer = ""
+        self._video_manifest = ""
+        self._video_saved = ""
+        self._recovering = False
+        self._waiting_recovery = False
         job.reset_runtime()
         job.status = Status.RUNNING
         job.started_at = time.time()
@@ -292,20 +311,43 @@ class QueueRunner(QObject):
         self._frame_started = 0.0
         self._config_file = _temp_file(".job.json")
         with open(self._config_file, "w", encoding="utf-8") as fh:
-            json.dump(job.render_config(index=self._index), fh, indent=1)
+            json.dump(job.render_config(index=self._queue_positions.get(job.id, self._index)), fh, indent=1)
 
         command = blender.render_command(exe, job.blend_path, self._config_file,
                                          self.settings.factory_startup)
+        self.jobStarted.emit(job.id)
+        self._launch(command)
+
+    def _launch(self, command):
+        job = self._current
         self._process = QProcess(self)
         self._process.setProcessChannelMode(QProcess.MergedChannels)
         self._process.readyReadStandardOutput.connect(self._on_output)
         self._process.finished.connect(self._on_process_finished)
         self._process.errorOccurred.connect(self._on_process_error)
 
-        self.jobStarted.emit(job.id)
         self.log.emit(job.id, "> " + " ".join(f'"{c}"' if " " in c else c for c in command))
         self.stateChanged.emit()
         self._process.start(command[0], command[1:])
+
+    def resolve_recovery(self, encode: bool):
+        """Answer the recovery prompt while keeping the current job locked."""
+        if not self._waiting_recovery or self._current is None:
+            return
+        self._waiting_recovery = False
+        job = self._current
+        if not encode:
+            job.message = "Rendered frames kept in " + os.path.dirname(self._video_manifest)
+            self.log.emit(job.id, job.message)
+            self._complete_job(*self._interrupted)
+            return
+        self._recovering = True
+        job.status = Status.ENCODING
+        job.message = f"Encoding {job.frames_done} rendered frames…"
+        self.jobProgress.emit(job.id)
+        command = blender.encode_command(self._exe_for[job.id], job.blend_path,
+                                         self._video_manifest, self.settings.factory_startup)
+        self._launch(command)
 
     def _fail(self, job: Job, message: str):
         job.status = Status.FAILED
@@ -365,10 +407,25 @@ class QueueRunner(QObject):
             self._frame_started = time.time()
         elif kind == "write":
             job.frames_done = int(event.get("written") or job.frames_done + 1)
-            job.last_output = event.get("path", "")
+            if not event.get("cached"):
+                job.last_output = event.get("path", "")
             if self._frame_started:
                 job.frame_times.append(max(0.0, time.time() - self._frame_started))
                 self._frame_started = 0.0
+        elif kind == "video_cache":
+            self._video_manifest = event["manifest"]
+            job.video_manifest = self._video_manifest
+            self.log.emit(job.id, "Video recovery frames: " + os.path.dirname(self._video_manifest))
+        elif kind == "encoding":
+            job.status = Status.ENCODING
+            job.message = "Encoding {} rendered frames…".format(event["frames"])
+            self.log.emit(job.id, job.message)
+        elif kind == "video_done":
+            self._video_saved = event["path"]
+            job.last_output = self._video_saved
+            if not event.get("partial"):
+                job.video_manifest = ""
+            self.log.emit(job.id, "Video saved: " + self._video_saved)
         elif kind == "retarget":
             self.log.emit(job.id, "Follow Path: {} -> {}".format(
                 event.get("object"), event.get("target")))
@@ -387,8 +444,49 @@ class QueueRunner(QObject):
     def _on_process_error(self, _error):
         if self._current is not None and self._process is not None:
             self.log.emit(self._current.id, "Process error: " + self._process.errorString())
+            if _error == QProcess.FailedToStart:
+                self._current.message = self._process.errorString()
+                self._on_process_finished(1, QProcess.NormalExit)
 
     def _on_process_finished(self, code: int, status):
+        self._on_output()  # finished can arrive with final progress still buffered
+        self._dispose_process()
+        job = self._current
+        if job is None:
+            return
+        if self._recovering:
+            if code == 0 and status != QProcess.CrashExit and self._video_saved:
+                job.message = f"Saved {job.frames_done} frames to {self._video_saved}"
+                self._complete_job(*self._interrupted)
+            else:
+                job.message = "Encoding failed or was stopped. Frames kept in " + os.path.dirname(self._video_manifest)
+                self.log.emit(job.id, job.message)
+                self._complete_job(1, QProcess.CrashExit, recovery_error=True)
+            return
+        interrupted = self._stopping or self._skipping or code != 0 or status == QProcess.CrashExit
+        if self._video_manifest and not self._video_saved:
+            # A clean process exit alone is not proof that an encoded file exists.
+            interrupted = True
+            if code == 0:
+                code = 1
+        if interrupted and self._video_manifest and not self._video_saved:
+            try:
+                _, frames = read_cache(self._video_manifest)
+            except (OSError, ValueError, KeyError) as exc:
+                self.log.emit(job.id, "Could not read recovery data: " + str(exc))
+                frames = []
+            if frames:
+                self._interrupted = (code, status)
+                self._waiting_recovery = True
+                job.frames_done = len(frames)
+                job.message = f"{len(frames)} rendered frames available to encode"
+                self.jobProgress.emit(job.id)
+                self.stateChanged.emit()
+                self.recoveryAvailable.emit(job.id, len(frames), os.path.dirname(self._video_manifest))
+                return
+        self._complete_job(code, status)
+
+    def _complete_job(self, code: int, status, recovery_error=False):
         job = self._current
         self._teardown_process()
         if job is None:
@@ -397,14 +495,22 @@ class QueueRunner(QObject):
         job.finished_at = time.time()
         killed = status == QProcess.CrashExit
 
-        if self._skipping:
+        if recovery_error:
+            self._skipping = False
+            job.status = Status.FAILED
+            self._had_error = True
+            self.jobFinished.emit(job.id, False, job.message)
+            if self._stopping or self.settings.stop_on_error:
+                self._finish_queue(False)
+                return
+        elif self._skipping:
             self._skipping = False
             job.status = Status.SKIPPED
-            job.message = "Skipped"
+            job.message = "Skipped" + (" — " + job.message if job.video_manifest or job.last_output else "")
             self.jobFinished.emit(job.id, True, job.message)
         elif self._stopping:
             job.status = Status.CANCELLED
-            job.message = "Stopped"
+            job.message = "Stopped" + (" — " + job.message if job.video_manifest or job.last_output else "")
             self.jobFinished.emit(job.id, False, job.message)
             self._finish_queue(False)
             return
@@ -425,14 +531,19 @@ class QueueRunner(QObject):
 
         self._next()
 
-    def _teardown_process(self):
+    def _dispose_process(self):
         if self._buffer.strip():
             self._handle_line(self._buffer.rstrip("\r"))
         self._buffer = ""
         if self._process is not None:
             self._process.deleteLater()
         self._process = None
+
+    def _teardown_process(self):
+        self._dispose_process()
         self._current = None
+        self._waiting_recovery = False
+        self._recovering = False
         if self._config_file:
             try:
                 os.remove(self._config_file)
@@ -446,6 +557,7 @@ class QueueRunner(QObject):
         self._index = -1
         self._stopping = False
         self._paused = False
+        self._skipping = False
         self.stateChanged.emit()
         self.queueFinished.emit(completed and not self._had_error)
 
